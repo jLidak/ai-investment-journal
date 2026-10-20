@@ -40,3 +40,11 @@ def test_msft_return_ticker():
 def test_rejects_invalid_ticker(invalid):
     with pytest.raises(ValueError):
         suggest_yahoo_ticker(invalid)
+
+
+
+def test_german_amazon_symbol_override():
+    result = suggest_yahoo_ticker("AMZN.DE")
+
+    assert result.xtb_ticker == "AMZN.DE"
+    assert result.yahoo_ticker == "AMZ.DE"

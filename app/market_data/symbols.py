@@ -2,6 +2,11 @@
 from dataclasses import dataclass
 
 
+YAHOO_SYMBOL_OVERRIDES = {
+    "AMZN.DE": "AMZ.DE",
+}
+
+
 @dataclass(frozen=True)
 class SymbolCandidate:
     xtb_ticker: str
@@ -23,6 +28,12 @@ def suggest_yahoo_ticker(xtb_ticker: str) -> SymbolCandidate:
     if not separator or not base or not market:
         raise ValueError(
             "Expected XTB ticker format: SYMBOL.MARKET"
+        )
+
+    if ticker in YAHOO_SYMBOL_OVERRIDES:
+        return SymbolCandidate(
+            xtb_ticker=ticker,
+            yahoo_ticker=YAHOO_SYMBOL_OVERRIDES[ticker],
         )
 
     yahoo_ticker = None
