@@ -1,119 +1,104 @@
+"""Audit all XTB instrument identities in one resumable run."""
 
 import argparse
-import csv
-from datetime import date
+from collections import Counter
 from pathlib import Path
 
 from app.ingestion.xtb_cash import read_cash_operations
 from app.ingestion.xtb_trade_comments import parse_trade_details
-from app.market_data.identity import fetch_yahoo_identity
+from app.market_data.identity_audit import (
+    get_yahoo_identity_cached,
+    make_identity_audit_row,
+    write_identity_reports,
+)
 from app.market_data.symbols import suggest_yahoo_ticker
+from app.market_data.verified_instruments import VERIFIED_INSTRUMENTS
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--offset", type=int, default=0)
-    parser.add_argument("--limit", type=int, default=3)
+    parser.add_argument("--refresh", action="store_true", help="Ignore successful cached metadata")
+    parser.add_argument("--ttl-days", type=int, default=30)
+    parser.add_argument("--delay", type=float, default=1.0)
+    parser.add_argument("--retries", type=int, default=2)
+    parser.add_argument("--limit", type=int, help="Debug only; normally audit ALL instruments")
     args = parser.parse_args()
+    if args.ttl_days < 1 or args.delay < 0 or not 0 <= args.retries <= 5:
+        parser.error("Invalid ttl/delay/retries")
+    if args.limit is not None and args.limit < 1:
+        parser.error("Limit must be positive")
 
-    if args.offset < 0 or not 1 <= args.limit <= 5:
-        parser.error("Offset must be >= 0 and limit must be 1-5")
-
-    files = sorted(
-        f for f in Path("data/private").glob("*.xlsx")
-        if not f.name.startswith("~$")
-    )
-
+    private_dir = Path("data/private")
+    files = sorted(p for p in private_dir.glob("*.xlsx") if not p.name.startswith("~$"))
     if not files:
-        print("No XTB exports found")
+        print("No XTB XLSX files found in data/private")
         return 1
 
-    names = {}
-
+    # Deduplicate all trades across all imported accounts/exports.
+    names: dict[str, set[str]] = {}
     for path in files:
-        operations = read_cash_operations(path)
-
-        for operation in operations:
-            if operation.operation_type not in (
-                "Stock purchase", "Stock sell"
-            ):
+        for operation in read_cash_operations(path):
+            if operation.operation_type not in {"Stock purchase", "Stock sell"}:
                 continue
-
             ticker = parse_trade_details(operation).ticker
             names.setdefault(ticker, set())
-
             if operation.instrument:
                 names[ticker].add(operation.instrument.strip())
 
     symbols = sorted(names)
-    selected = symbols[args.offset:args.offset + args.limit]
-
-    if not selected:
-        print("No instruments in selected range")
+    if not symbols:
+        print("No traded instruments found")
         return 1
+    if args.limit is not None:
+        symbols = symbols[:args.limit]
+        print("DEBUG: report contains only a subset of instruments")
 
-    records = []
+    cache_dir = private_dir / "market_audit" / "identity_cache"
+    rows = []
+    counters = Counter()
+    print(f"Checking {len(symbols)} unique instruments (sequential, cached)")
 
-    for xtb_ticker in selected:
-        candidate = suggest_yahoo_ticker(xtb_ticker)
+    for i, xtb in enumerate(symbols, start=1):
+        registered = VERIFIED_INSTRUMENTS.get(xtb)
+        candidate = suggest_yahoo_ticker(xtb)
+        # Reviewed mapping takes precedence over a rule-based suggestion.
+        yahoo = registered.yahoo_ticker if registered else candidate.yahoo_ticker
         identity = None
+        metadata_source = ""
         error_type = ""
-
-        if candidate.yahoo_ticker:
+        if yahoo:
             try:
-                identity = fetch_yahoo_identity(
-                    candidate.yahoo_ticker
+                identity, metadata_source = get_yahoo_identity_cached(
+                    yahoo,
+                    cache_dir,
+                    ttl_days=args.ttl_days,
+                    refresh=args.refresh,
+                    retries=args.retries,
+                    delay=args.delay,
                 )
             except Exception as exc:
                 error_type = type(exc).__name__
 
-        if identity:
-            status = "REVIEW_REQUIRED"
-        elif candidate.yahoo_ticker is None:
-            status = "UNMAPPED"
-        else:
-            status = "FETCH_ERROR"
-
-        records.append({
-            "xtb_ticker": xtb_ticker,
-            "xtb_names": " | ".join(sorted(names[xtb_ticker])),
-            "yahoo_ticker": candidate.yahoo_ticker or "",
-            "yahoo_name": identity.name if identity else "",
-            "yahoo_quote_type": (
-                identity.quote_type if identity else ""
-            ),
-            "yahoo_currency": (
-                identity.currency if identity else ""
-            ),
-            "yahoo_exchange": (
-                identity.exchange if identity else ""
-            ),
-            "status": status,
-            "error_type": error_type,
-        })
-
-        print(f"{xtb_ticker}: {status}")
-
-    folder = Path("data/private/market_audit")
-    folder.mkdir(parents=True, exist_ok=True)
-
-    last = args.offset + len(selected) - 1
-    path = folder / (
-        f"identity_{date.today()}_"
-        f"{args.offset:03d}_{last:03d}.csv"
-    )
-
-    with path.open("w", encoding="utf-8-sig", newline="") as file:
-        writer = csv.DictWriter(
-            file, fieldnames=list(records[0])
+        row = make_identity_audit_row(
+            xtb, names[xtb], yahoo, identity,
+            metadata_source=metadata_source,
+            error_type=error_type,
         )
-        writer.writeheader()
-        writer.writerows(records)
+        rows.append(row)
+        counters[row.status] += 1
+        print(f"[{i}/{len(symbols)}] {xtb}: {row.status} ({metadata_source or error_type or '-'})")
 
-    print(f"\nSaved to: {path}")
-    print("All identity matches require manual verification.")
-
-    return 0
+    all_path, review_path = write_identity_reports(
+        rows, private_dir / "market_audit",
+        prefix="identity_debug" if args.limit is not None else "identity",
+    )
+    print("\nSUMMARY")
+    for status, number in sorted(counters.items()):
+        print(f"  {status}: {number}")
+    print(f"Full report: {all_path}")
+    print(f"Review queue: {review_path}")
+    print("CANDIDATE does NOT mean confirmed instrument identity.")
+    return 1 if counters["FETCH_ERROR"] else 0
 
 
 if __name__ == "__main__":

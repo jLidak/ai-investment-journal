@@ -6,6 +6,8 @@ from app.market_data.verified_instruments import (
     get_verified_instrument,
 )
 
+from app.market_data.isin import is_valid_isin
+from app.market_data.verified_instruments import VERIFIED_INSTRUMENTS
 
 @pytest.mark.parametrize(
     "ticker, yahoo, isin",
@@ -72,3 +74,8 @@ def test_anav_is_eur_quoted_etf():
     assert result.kind == InstrumentKind.ETF
     assert result.quote_currency == "EUR"
     assert "USD Acc" in result.name
+
+def test_all_registered_instruments_have_valid_isin():
+    for ticker, instrument in VERIFIED_INSTRUMENTS.items():
+        assert is_valid_isin(instrument.isin), ticker
+        assert instrument.xtb_ticker == ticker
