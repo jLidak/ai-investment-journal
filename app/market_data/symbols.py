@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 YAHOO_SYMBOL_OVERRIDES = {
     "AMZN.DE": "AMZ.DE",
+    "AMZN.DE": "AMZ.DE",
+    "TSLA.DE": "TL0.DE"
 }
 
 

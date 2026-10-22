@@ -48,3 +48,8 @@ def test_german_amazon_symbol_override():
 
     assert result.xtb_ticker == "AMZN.DE"
     assert result.yahoo_ticker == "AMZ.DE"
+
+def test_german_tesla_symbol_override():
+    result = suggest_yahoo_ticker("TSLA.DE")
+
+    assert result.yahoo_ticker == "TL0.DE"
